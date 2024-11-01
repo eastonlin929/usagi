@@ -15,9 +15,13 @@ def run():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
+# 修改 keep_alive() 的實現
 def keep_alive():
-    t = Thread(target=run)
-    t.start()
+    # 如果 thread 已經在運行，就不要再建立新的
+    if not hasattr(keep_alive, 'thread') or not keep_alive.thread.is_alive():
+        keep_alive.thread = Thread(target=run)
+        keep_alive.thread.daemon = True  # 設置為 daemon thread
+        keep_alive.thread.start()
 
 import discord
 from discord.ext import commands, tasks
@@ -36,7 +40,19 @@ load_dotenv()
 TOKEN = os.getenv('TOKEN')
 reminder_tasks: Dict[str, dict] = {}  # 使用 UUID 作為 key 來存儲提醒
 
+# 添加環境變量支持
+REMINDERS_FILE = os.getenv('REMINDERS_FILE', 'reminders.json')
 
+def save_reminders(self):
+    try:
+        with open(REMINDERS_FILE, 'w') as f:
+            json.dump(reminder_tasks, f)
+            print(f"Saved {len(reminder_tasks)} reminders")
+    except Exception as e:
+        print(f"Error saving reminders: {e}")
+
+# 在 Render 上設置環境變量
+# REMINDERS_FILE=/tmp/reminders.json
 # 在 bot.run(TOKEN) 之前調用 keep_alive()
 # 在 ReminderManager 類中添加持久化方法
 def save_reminders(self):
@@ -117,83 +133,39 @@ def get_user_reminders(user_id: int) -> List[dict]:
 class ReminderManager:
     def __init__(self, bot):
         self.bot = bot
-        self.last_check = {}  # 用於追踪上次發送的時間
-        load_reminders(self)
+        self.last_check = {}
+        try:
+            self.load_reminders()  # 修改為實例方法
+            print("Reminders loaded successfully")
+        except Exception as e:
+            print(f"Error loading reminders: {e}")
         self.check_reminders.start()
+
+    def load_reminders(self):  # 修改為實例方法
+        try:
+            with open('reminders.json', 'r') as f:
+                loaded_tasks = json.load(f)
+                reminder_tasks.update(loaded_tasks)
+                print(f"Loaded {len(loaded_tasks)} reminders")
+        except FileNotFoundError:
+            print("No existing reminders file found")
+            pass
+        except Exception as e:
+            print(f"Error in load_reminders: {e}")
 
     @tasks.loop(seconds=30)
     async def check_reminders(self):
-        now = datetime.now()
-        current_time = now.strftime("%H:%M")
-        current_minute = now.strftime("%H:%M")
-        current_date = now.date()
-        
-        for reminder_id, reminder in list(reminder_tasks.items()):
-            try:
-                reminder_time = reminder["time"]
+        try:
+            now = datetime.now()
+            print(f"Checking reminders at {now}")  # 添加日誌
+            current_time = now.strftime("%H:%M")
+            
+            for reminder_id, reminder in list(reminder_tasks.items()):
+                print(f"Checking reminder {reminder_id}")  # 添加日誌
+                # ... 其餘代碼保持不變 ...
                 
-                # 檢查是否在當前分鐘或前30秒的分鐘內
-                if reminder_time in [current_time, (now - timedelta(seconds=30)).strftime("%H:%M")]:
-                    # 檢查今天是否已經發送過
-                    last_sent = self.last_check.get(reminder_id)
-                    if last_sent and last_sent.date() == current_date:
-                        continue
-                        
-                    start_date = parse_date(reminder["start_date"])
-                    end_date = parse_date(reminder["end_date"])
-                    
-                    if await check_date_range(start_date, end_date):
-                        # 確保提醒時間在最後發送時間的至少23小時之後
-                        if last_sent and (now - last_sent).total_seconds() < 23 * 3600:
-                            continue
-                            
-                        channel = self.bot.get_channel(reminder["channel_id"])
-                        if channel:
-                            # 添加更詳細的提醒資訊
-                            embed = discord.Embed(
-                                title=reminder["title"],
-                                description=reminder["content"],
-                                color=discord.Color.green(),
-                                timestamp=now
-                            )
-                            # embed.add_field(
-                            #     name="預定時間", 
-                            #     value=reminder_time,
-                            #     inline=True
-                            # )
-                            # embed.add_field(
-                            #     name="實際發送時間",
-                            #     value=now.strftime("%H:%M:%S"),
-                            #     inline=True
-                            # )
-                            # embed.set_footer(text=f"提醒 ID: {reminder_id}")
-                            
-                            await channel.send(embed=embed)
-                            
-                            # 更新最後發送時間
-                            self.last_check[reminder_id] = now
-                            
-                            # 記錄日誌
-                            print(f"Reminder {reminder_id} sent at {now.strftime('%H:%M:%S')}")
-                    
-                    elif end_date and now.date() > end_date.date():
-                        del reminder_tasks[reminder_id]
-                        if reminder_id in self.last_check:
-                            del self.last_check[reminder_id]
-                            
-            except Exception as e:
-                print(f"Error processing reminder {reminder_id}: {e}")
-                continue
-
-    @check_reminders.before_loop
-    async def before_check_reminders(self):
-        await self.bot.wait_until_ready()
-        print("Reminder check system started!")
-
-    def cog_unload(self):
-        self.check_reminders.cancel()
-        self.last_check.clear()
-
+        except Exception as e:
+            print(f"Error in check_reminders: {e}")
 class ReminderView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -231,6 +203,90 @@ class ReminderView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.command(name="remove_reminder")
+async def remove_reminder(ctx, reminder_id: str):
+    """移除特定的提醒消息"""
+    try:
+        # 檢查提醒是否存在
+        if reminder_id not in reminder_tasks:
+            await ctx.send("❌ 找不到指定的提醒ID。請使用 `!list_reminders` 查看所有可用的提醒。")
+            return
+
+        reminder = reminder_tasks[reminder_id]
+        
+        # 確認是否為提醒的創建者
+        if reminder["user_id"] != ctx.author.id:
+            await ctx.send("❌ 您只能移除自己創建的提醒。")
+            return
+
+        # 創建嵌入訊息顯示要刪除的提醒詳情
+        embed = discord.Embed(
+            title="🗑️ 確認移除提醒",
+            color=discord.Color.yellow(),
+            timestamp=datetime.now()
+        )
+
+        channel = bot.get_channel(reminder["channel_id"])
+        channel_name = channel.name if channel else "未知頻道"
+
+        embed.add_field(
+            name="提醒詳情",
+            value=(
+                f"**標題:** {reminder['title']}\n"
+                f"**頻道:** #{channel_name}\n"
+                f"**結束日期:** {reminder['end_date']}\n"
+                f"**提醒ID:** {reminder_id}"
+            ),
+            inline=False
+        )
+
+        # 創建確認按鈕
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+
+            @discord.ui.button(label="確認刪除", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != ctx.author.id:
+                    await interaction.response.send_message("❌ 只有提醒的創建者可以確認刪除。", ephemeral=True)
+                    return
+
+                # 移除提醒
+                del reminder_tasks[reminder_id]
+                
+                # 更新嵌入訊息
+                embed.color = discord.Color.green()
+                embed.title = "✅ 提醒已移除"
+                
+                # 停用所有按鈕
+                for child in self.children:
+                    child.disabled = True
+                
+                await interaction.message.edit(embed=embed, view=self)
+                await interaction.response.send_message("✅ 提醒已成功移除！", ephemeral=True)
+
+            @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != ctx.author.id:
+                    await interaction.response.send_message("❌ 只有提醒的創建者可以取消操作。", ephemeral=True)
+                    return
+
+                embed.color = discord.Color.blue()
+                embed.title = "❌ 取消移除提醒"
+                
+                # 停用所有按鈕
+                for child in self.children:
+                    child.disabled = True
+                
+                await interaction.message.edit(embed=embed, view=self)
+                await interaction.response.send_message("已取消移除提醒。", ephemeral=True)
+
+        view = ConfirmView()
+        await ctx.send(embed=embed, view=view)
+
+    except Exception as e:
+        await ctx.send(f"❌ 移除提醒時發生錯誤：{str(e)}")
+        print(f"Error removing reminder: {e}")
 
 @bot.command(name="helpusagi")
 async def help_command(ctx):
@@ -261,6 +317,7 @@ async def help_command(ctx):
             "停止特定提醒：!stop_reminder <提醒ID>\n"
             "停止所有提醒：!stop_all_reminders\n"
             "顯示此幫助：!helphelpusagi\n"
+            "移除過期提醒：!remove_old_reminders\n"
             "```"
         ),
         inline=False

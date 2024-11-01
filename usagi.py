@@ -1,3 +1,24 @@
+
+
+from flask import Flask
+from threading import Thread
+import os
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    # 确保使用 Render 提供的端口
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
 import discord
 from discord.ext import commands, tasks
 import datetime
@@ -6,11 +27,32 @@ from datetime import datetime, timedelta
 import re
 import uuid
 from dotenv import load_dotenv
-import os
+
+import json
+
+
 # 設置基本配置
 load_dotenv()
 TOKEN = os.getenv('TOKEN')
 reminder_tasks: Dict[str, dict] = {}  # 使用 UUID 作為 key 來存儲提醒
+
+
+# 在 bot.run(TOKEN) 之前調用 keep_alive()
+# 在 ReminderManager 類中添加持久化方法
+def save_reminders(self):
+    with open('reminders.json', 'w') as f:
+        json.dump(reminder_tasks, f)
+
+def load_reminders(self):
+    try:
+        with open('reminders.json', 'r') as f:
+            loaded_tasks = json.load(f)
+            reminder_tasks.update(loaded_tasks)
+    except FileNotFoundError:
+        pass
+
+# 在 setup_hook 或 __init__ 中調用 load_reminders
+
 class ReminderBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -76,6 +118,7 @@ class ReminderManager:
     def __init__(self, bot):
         self.bot = bot
         self.last_check = {}  # 用於追踪上次發送的時間
+        load_reminders(self)
         self.check_reminders.start()
 
     @tasks.loop(seconds=30)
@@ -361,5 +404,5 @@ async def stop_all_reminders(ctx):
 
 # 啟動機器人
 
-
+keep_alive()
 bot.run(TOKEN)
